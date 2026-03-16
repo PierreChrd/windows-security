@@ -31,7 +31,6 @@ param(
 
 function Write-Info { param($m) if (-not $Quiet) { Write-Host "[INFO]  $m" -ForegroundColor Cyan } }
 function Write-Warn { param($m) Write-Warning $m }
-function Write-Err  { param($m) Write-Error $m }
 
 function Assert-Admin {
     $isAdmin = ([Security.Principal.WindowsPrincipal] `
@@ -39,14 +38,14 @@ function Assert-Admin {
     ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
     if (-not $isAdmin) {
-        Write-Err "This script must be run as Administrator."
+        Write-Error "This script must be run as Administrator."
         exit 1
     }
 }
 
 function Assert-BitLockerModule {
     if (-not (Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
-        Write-Err "BitLocker module is not available on this system."
+        Write-Error "BitLocker module is not available on this system."
         exit 1
     }
 }
@@ -57,16 +56,16 @@ function Get-OsVolume {
 
 function Assert-TPMReady {
     try { $tpm = Get-Tpm } catch {
-        Write-Err "Unable to query TPM. Ensure TPM is enabled in UEFI."
+        Write-Error "Unable to query TPM. Ensure TPM is enabled in UEFI."
         exit 1
     }
 
     if (-not $tpm.TpmPresent) {
-        Write-Err "TPM not detected."
+        Write-Error "TPM not detected."
         exit 1
     }
     if (-not $tpm.TpmReady) {
-        Write-Err "TPM is not initialized."
+        Write-Error "TPM is not initialized."
         exit 1
     }
 
@@ -206,6 +205,6 @@ try {
     }
 }
 catch {
-    Write-Err "$($_.Exception.Message)"
+    Write-Error "$($_.Exception.Message)"
     exit 1
 }
