@@ -226,6 +226,6 @@ try {
     }
 }
 catch {
-    Write-Err $_.Exception.Message
+    Write-Err "$($_.Exception.Message)"
     exit 1
 }
