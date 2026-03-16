@@ -3,14 +3,14 @@
   Manages BitLocker on the OS volume with TPM+PIN pre-boot authentication.
 
 .DESCRIPTION
-  -Action Enable  : Enables BitLocker on the system drive (default C:), adds TPM + PIN,
+  -Action Enable  : Enables BitLocker on the OS volume (default C:), adds TPM+PIN,
                     creates and saves a recovery key.
-  -Action Disable : Disables (decrypts) BitLocker on the target volume.
-  -Action Suspend : Temporarily suspends BitLocker protection.
-  -Action Resume  : Resumes BitLocker protection if suspended.
+  -Action Disable : Decrypts the volume.
+  -Action Suspend : Suspends BitLocker.
+  -Action Resume  : Resumes BitLocker.
 
 .NOTES
-  Run this script in an elevated PowerShell session (Run as Administrator).
+  Run as Administrator. Compatible with PowerShell 5.1.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -34,7 +34,7 @@ function Write-Warn { param($m) Write-Warning $m }
 function Write-Err  { param($m) Write-Error $m }
 
 function Assert-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal] `
+    $isAdmin = ([Security.Principal.WindowsPrincipal]
         [Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
@@ -46,7 +46,7 @@ function Assert-Admin {
 
 function Assert-BitLockerModule {
     if (-not (Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
-        Write-Err "BitLocker cmdlets are not available on this system."
+        Write-Err "BitLocker module is not available on this system."
         exit 1
     }
 }
@@ -56,19 +56,17 @@ function Get-OsVolume {
 }
 
 function Assert-TPMReady {
-    try {
-        $tpm = Get-Tpm
-    } catch {
-        Write-Err "Unable to query TPM. Ensure TPM is enabled in UEFI firmware."
+    try { $tpm = Get-Tpm } catch {
+        Write-Err "Unable to query TPM. Ensure TPM is enabled in UEFI."
         exit 1
     }
 
     if (-not $tpm.TpmPresent) {
-        Write-Err "TPM not detected. TPM+PIN requires a TPM chip."
+        Write-Err "TPM not detected."
         exit 1
     }
     if (-not $tpm.TpmReady) {
-        Write-Err "TPM is present but not ready. Initialize it in UEFI or via TPM.msc."
+        Write-Err "TPM is not initialized."
         exit 1
     }
 
@@ -76,21 +74,16 @@ function Assert-TPMReady {
 }
 
 function Read-PinSecure {
-    # PIN must be numeric only (4 to 20 digits)
     $pin1 = Read-Host "Enter BitLocker PIN (4-20 digits)" -AsSecureString
     $pin2 = Read-Host "Confirm PIN" -AsSecureString
 
-    $p1 = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin1))
-    $p2 = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin2))
+    $p1 = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin1))
+    $p2 = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin2))
 
-    if ($p1 -ne $p2) {
-        throw "PIN entries do not match."
-    }
+    if ($p1 -ne $p2) { throw "PIN entries do not match." }
 
     if ($p1.Length -lt 4 -or $p1.Length -gt 20 -or ($p1 -notmatch "^[0-9]+$")) {
-        throw "PIN must contain only digits (4 to 20)."
+        throw "PIN must contain 4 to 20 numeric digits."
     }
 
     return $pin1
@@ -100,21 +93,12 @@ function Ensure-RecoveryProtector {
     param([string]$MountPoint)
 
     $vol = Get-BitLockerVolume -MountPoint $MountPoint
-    $hasRecovery = $false
+    $rec = $vol.KeyProtector | Where-Object KeyProtectorType -eq "RecoveryPassword" | Select-Object -First 1
 
-    foreach ($kp in $vol.KeyProtector) {
-        if ($kp.KeyProtectorType -eq "RecoveryPassword") {
-            $hasRecovery = $true
-            break
-        }
+    if (-not $rec) {
+        Write-Info "Adding recovery password protector..."
+        Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector | Out-Null
     }
-
-    if (-not $hasRecovery) {
-        Write-Info "Adding a Recovery Password protector..."
-        return Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector
-    }
-
-    return $null
 }
 
 function Save-RecoveryKeyLocally {
@@ -122,7 +106,6 @@ function Save-RecoveryKeyLocally {
 
     $vol = Get-BitLockerVolume -MountPoint $MountPoint
     $rec = $vol.KeyProtector | Where-Object KeyProtectorType -eq "RecoveryPassword" | Select-Object -First 1
-
     if (-not $rec) { return }
 
     $dir = Join-Path $env:PUBLIC "Documents\\BitLocker-RecoveryKeys"
@@ -130,22 +113,22 @@ function Save-RecoveryKeyLocally {
 
     $file = Join-Path $dir ("RecoveryKey_{0}_{1}.txt" -f $MountPoint.TrimEnd(':'), (Get-Date -Format "yyyyMMdd_HHmmss"))
 
-    $text = @(
+    $data = @(
         "Drive        : $MountPoint"
         "Timestamp    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         "Protector ID : $($rec.KeyProtectorId)"
         "Recovery Key : $($rec.RecoveryPassword)"
     )
 
-    $text | Out-File -FilePath $file -Encoding ASCII
-    Write-Info "Recovery key saved locally at: $file"
+    $data | Out-File -FilePath $file -Encoding ASCII
+    Write-Info "Recovery key saved to $file"
 }
 
 function Backup-RecoveryKey-ToAAD {
     param([string]$MountPoint)
 
     if (-not (Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue)) {
-        Write-Warn "AAD key backup not supported on this device."
+        Write-Warn "AAD backup not supported."
         return
     }
 
@@ -154,65 +137,63 @@ function Backup-RecoveryKey-ToAAD {
 
     if ($rec) {
         BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $rec.KeyProtectorId
-        Write-Info "Recovery key successfully backed up to Entra ID (AAD)."
+        Write-Info "Recovery key backed up to Entra ID (AAD)."
     }
+}
+
+function Add-Or-Replace-TpmPinProtector {
+    param([string]$MountPoint, [SecureString]$Pin)
+
+    $vol = Get-BitLockerVolume -MountPoint $MountPoint
+    $existingPin = $vol.KeyProtector | Where-Object KeyProtectorType -eq "TpmPin"
+
+    if ($existingPin) {
+        Write-Warn "A TPM+PIN protector already exists."
+
+        $choice = Read-Host "Replace existing PIN? (Y/N)"
+        if ($choice -notmatch "^[Yy]$") {
+            Write-Info "Keeping existing TPM+PIN. Skipping."
+            return
+        }
+
+        Write-Info "Removing existing TPM+PIN protector..."
+        manage-bde -protectors -delete $MountPoint -id $existingPin.KeyProtectorId | Out-Null
+    }
+
+    Write-Info "Adding new TPM+PIN protector..."
+    Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmPinProtector -Pin $Pin | Out-Null
+    Write-Info "New PIN applied successfully."
 }
 
 function Enable-WithPin {
     Assert-TPMReady
 
     $vol = Get-OsVolume
-    if ($vol.ProtectionStatus -eq "On") {
-        Write-Info "BitLocker is already enabled on $MountPoint."
-    } else {
-        Write-Info "Enabling BitLocker on $MountPoint..."
-        Enable-BitLocker -MountPoint $MountPoint `
-                         -EncryptionMethod $EncryptionMethod `
-                         -UsedSpaceOnly:$UsedSpaceOnly `
-                         -TpmProtector `
-                         -SkipHardwareTest `
-                         -ErrorAction Stop
-
+    if ($vol.ProtectionStatus -ne "On") {
+        Write-Info "Enabling BitLocker..."
+        Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod $EncryptionMethod -UsedSpaceOnly:$UsedSpaceOnly -TpmProtector -SkipHardwareTest
         Write-Info "Encryption started."
+    } else {
+        Write-Info "BitLocker already enabled."
     }
 
-    Write-Info "Adding TPM+PIN protector..."
     $pin = Read-PinSecure
-    Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmPinProtector -Pin $pin | Out-Null
-    Write-Info "PIN successfully added."
+    Add-Or-Replace-TpmPinProtector -MountPoint $MountPoint -Pin $pin
 
-    Ensure-RecoveryProtector -MountPoint $MountPoint | Out-Null
+    Ensure-RecoveryProtector -MountPoint $MountPoint
     Save-RecoveryKeyLocally -MountPoint $MountPoint
 
     if ($BackupRecoveryToAAD) {
         Backup-RecoveryKey-ToAAD -MountPoint $MountPoint
     }
 
-    Write-Host "`n*** Reboot required for the pre-boot PIN prompt to appear. ***" -ForegroundColor Yellow
+    Write-Warn "Reboot required for the pre-boot PIN screen."
 }
 
-function Disable-Decrypt {
-    $vol = Get-OsVolume
-    if ($vol.ProtectionStatus -ne "On") {
-        Write-Info "BitLocker is not enabled on $MountPoint."
-        return
-    }
+function Disable-Decrypt { Disable-BitLocker -MountPoint $MountPoint }
+function Suspend-Protection { Suspend-BitLocker -MountPoint $MountPoint -RebootCount 0 }
+function Resume-Protection  { Resume-BitLocker -MountPoint $MountPoint }
 
-    Write-Warn "Decrypting $MountPoint..."
-    Disable-BitLocker -MountPoint $MountPoint
-}
-
-function Suspend-Protection {
-    Write-Info "Suspending BitLocker protection on $MountPoint..."
-    Suspend-BitLocker -MountPoint $MountPoint -RebootCount 0
-}
-
-function Resume-Protection {
-    Write-Info "Resuming BitLocker protection on $MountPoint..."
-    Resume-BitLocker -MountPoint $MountPoint
-}
-
-# Main
 try {
     Assert-Admin
     Assert-BitLockerModule
@@ -222,7 +203,6 @@ try {
         "Disable" { Disable-Decrypt }
         "Suspend" { Suspend-Protection }
         "Resume"  { Resume-Protection }
-        default   { Write-Err "Invalid action specified." }
     }
 }
 catch {
