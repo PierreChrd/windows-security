@@ -202,12 +202,12 @@ function Enable-WithPin {
 
         if ($UsedSpaceOnly) { $args += "-usedspaceonly" }
 
-        # Map PowerShell names to manage-bde method tokens (two-word values)
+        # Mapping PowerShell -> manage-bde tokens (lowercase, exact)
         $methodMap = @{
-            "XtsAes256" = @("-em", "XTS-AES 256")
-            "XtsAes128" = @("-em", "XTS-AES 128")
-            "Aes256"    = @("-em", "AES 256")
-            "Aes128"    = @("-em", "AES 128")
+            "XtsAes256" = @("-em", "xts_aes256")
+            "XtsAes128" = @("-em", "xts_aes128")
+            "Aes256"    = @("-em", "aes256")
+            "Aes128"    = @("-em", "aes128")
         }
 
         if ($methodMap.ContainsKey($EncryptionMethod)) {
@@ -222,7 +222,8 @@ function Enable-WithPin {
         }
 
         Write-Info "Encryption started."
-    } else {
+    }
+    else {
         Write-Info "BitLocker already enabled."
     }
 
