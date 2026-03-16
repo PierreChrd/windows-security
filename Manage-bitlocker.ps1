@@ -34,7 +34,7 @@ function Write-Warn { param($m) Write-Warning $m }
 function Write-Err  { param($m) Write-Error $m }
 
 function Assert-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal]
+    $isAdmin = ([Security.Principal.WindowsPrincipal] `
         [Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
