@@ -153,41 +153,43 @@ function Backup-RecoveryKey-ToAAD {
 
 function Set-BitLockerTpmPin {
     param(
+        [Parameter(Mandatory=$true)]
         [string]$MountPoint,
+
+        [Parameter(Mandatory=$true)]
         [SecureString]$Pin
     )
 
+    # Detect existing TPM+PIN and optionally remove it
     $vol = Get-BitLockerVolume -MountPoint $MountPoint
     $existingPin = $vol.KeyProtector | Where-Object KeyProtectorType -eq "TpmPin"
 
     if ($existingPin) {
-        Write-Warn "A TPM+PIN protector already exists."
-
+        Write-Warning "A TPM+PIN protector already exists."
         $resp = Read-Host "Replace existing PIN? (Y/N)"
         if ($resp -notmatch "^[Yy]$") {
             Write-Info "Keeping existing PIN. Skipping."
             return
         }
-
         Write-Info "Removing existing TPM+PIN protector..."
         manage-bde -protectors -delete $MountPoint -id $existingPin.KeyProtectorId | Out-Null
     }
 
-    $plain = ConvertToPlain -Sec $Pin
+    # IMPORTANT:
+    # On this Windows build, manage-bde does not accept '-PIN <value>' as an argument.
+    # It will prompt for the PIN itself after '-TPMAndPIN'.
+    Write-Host "[INFO]  Adding TPM+PIN using manage-bde..." -ForegroundColor Cyan
+    Write-Host "[INFO]  You will be prompted by manage-bde to enter the PIN. Please enter the SAME PIN you typed earlier." -ForegroundColor Yellow
 
-    Write-Info "Adding TPM+PIN using manage-bde..."
-    $cmd = "manage-bde.exe -protectors -add $MountPoint -TPMAndPIN -PIN $plain"
-
-    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmd" -NoNewWindow -PassThru -Wait
+    # Call manage-bde without -PIN; it will prompt securely for the PIN
+    $args = @("-protectors", "-add", $MountPoint, "-TPMAndPIN")
+    $proc = Start-Process -FilePath "manage-bde.exe" -ArgumentList $args -NoNewWindow -PassThru -Wait
 
     if ($proc.ExitCode -eq 0) {
-        Write-Info "TPM+PIN added successfully."
+        Write-Host "[OK]    TPM+PIN added successfully." -ForegroundColor Green
+    } else {
+        Write-Error "manage-bde returned exit code $($proc.ExitCode)"
     }
-    else {
-        Write-Err "manage-bde returned exit code $($proc.ExitCode)"
-    }
-
-    $plain = $null
 }
 
 function Enable-WithPin {
