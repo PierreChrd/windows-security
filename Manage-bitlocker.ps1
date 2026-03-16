@@ -15,13 +15,13 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet("Enable","Disable","Suspend","Resume")]
+    [ValidateSet("Enable", "Disable", "Suspend", "Resume")]
     [string]$Action = "Enable",
 
     [ValidatePattern("^[A-Z]:$")]
     [string]$MountPoint = "C:",
 
-    [ValidateSet("XtsAes128","XtsAes256","Aes128","Aes256")]
+    [ValidateSet("XtsAes128", "XtsAes256", "Aes128", "Aes256")]
     [string]$EncryptionMethod = "XtsAes256",
 
     [switch]$UsedSpaceOnly,
@@ -31,11 +31,11 @@ param(
 
 function Write-Info { param($m) if (-not $Quiet) { Write-Host "[INFO]  $m" -ForegroundColor Cyan } }
 function Write-Warn { param($m) Write-Warning $m }
-function Write-Err  { param($m) Write-Error $m }
+function Write-Err { param($m) Write-Error $m }
 
 function Assert-Admin {
     $isAdmin = ([Security.Principal.WindowsPrincipal] `
-        [Security.Principal.WindowsIdentity]::GetCurrent()
+            [Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
     if (-not $isAdmin) {
@@ -182,7 +182,8 @@ function Set-BitLockerTpmPin {
 
     if ($proc.ExitCode -eq 0) {
         Write-Info "TPM+PIN added successfully."
-    } else {
+    }
+    else {
         Write-Err "manage-bde returned exit code $($proc.ExitCode)"
     }
 
@@ -194,37 +195,69 @@ function Enable-WithPin {
 
     $vol = Get-OsVolume
     if ($vol.ProtectionStatus -ne "On") {
-        Write-Info "Enabling BitLocker..."
-        Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod $EncryptionMethod -UsedSpaceOnly:$UsedSpaceOnly -TpmProtector -SkipHardwareTest
+        Write-Info "Enabling BitLocker (manage-bde)..."
+
+        # Build manage-bde arguments
+        $args = @("-on", $MountPoint, "-skiphardwaretest")
+
+        if ($UsedSpaceOnly) {
+            $args += "-usedspaceonly"
+        }
+
+        # Map PowerShell names to manage-bde method tokens
+        $methodMap = @{
+            "XtsAes256" = "xts_aes256"
+            "XtsAes128" = "xts_aes128"
+            "Aes256"    = "aes256"
+            "Aes128"    = "aes128"
+        }
+
+        $m = $methodMap[$EncryptionMethod]
+        if ($m) {
+            $args += @("-method", $m)
+        }
+
+        # Start encryption via manage-bde
+        $proc = Start-Process -FilePath "manage-bde.exe" -ArgumentList $args -NoNewWindow -PassThru -Wait
+        if ($proc.ExitCode -ne 0) {
+            Write-Err "manage-bde -on returned exit code $($proc.ExitCode)"
+            exit 1
+        }
+
         Write-Info "Encryption started."
-    } else {
+    }
+    else {
         Write-Info "BitLocker already enabled."
     }
 
+    # Ask and set PIN (function already handles replace logic)
     $pin = Read-PinSecure
     Set-BitLockerTpmPin -MountPoint $MountPoint -Pin $pin
 
+    # Ensure Recovery Password protector exists and save locally
     Ensure-RecoveryProtector -MountPoint $MountPoint
     Save-RecoveryKeyLocally -MountPoint $MountPoint
 
-    if ($BackupRecoveryToAAD) { Backup-RecoveryKey-ToAAD -MountPoint $MountPoint }
+    if ($BackupRecoveryToAAD) {
+        Backup-RecoveryKey-ToAAD -MountPoint $MountPoint
+    }
 
     Write-Warn "Reboot required for the pre-boot PIN screen."
 }
 
 function Disable-Decrypt { Disable-BitLocker -MountPoint $MountPoint }
 function Suspend-Protection { Suspend-BitLocker -MountPoint $MountPoint -RebootCount 0 }
-function Resume-Protection  { Resume-BitLocker -MountPoint $MountPoint }
+function Resume-Protection { Resume-BitLocker -MountPoint $MountPoint }
 
 try {
     Assert-Admin
     Assert-BitLockerModule
 
     switch ($Action) {
-        "Enable"  { Enable-WithPin }
+        "Enable" { Enable-WithPin }
         "Disable" { Disable-Decrypt }
         "Suspend" { Suspend-Protection }
-        "Resume"  { Resume-Protection }
+        "Resume" { Resume-Protection }
     }
 }
 catch {
