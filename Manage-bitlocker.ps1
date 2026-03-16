@@ -141,7 +141,13 @@ function Backup-RecoveryKey-ToAAD {
 }
 
 function Add-Or-Replace-TpmPinProtector {
-    param([string]$MountPoint, [SecureString]$Pin)
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$MountPoint,
+
+        [Parameter(Mandatory=$true)]
+        [SecureString]$Pin
+    )
 
     $vol = Get-BitLockerVolume -MountPoint $MountPoint
     $existingPin = $vol.KeyProtector | Where-Object KeyProtectorType -eq "TpmPin"
@@ -163,6 +169,7 @@ function Add-Or-Replace-TpmPinProtector {
     Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmPinProtector -Pin $Pin | Out-Null
     Write-Info "New PIN applied successfully."
 }
+
 
 function Enable-WithPin {
     Assert-TPMReady
