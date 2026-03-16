@@ -10,7 +10,7 @@
   -Action Resume  : Resumes BitLocker.
 
 .NOTES
-  Run as Administrator. Compatible with PowerShell 5.1.
+  Run this script in an elevated PowerShell session (Run as Administrator).
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -31,21 +31,22 @@ param(
 
 function Write-Info { param($m) if (-not $Quiet) { Write-Host "[INFO]  $m" -ForegroundColor Cyan } }
 function Write-Warn { param($m) Write-Warning $m }
+function Write-Err  { param($m) Write-Error $m }
 
 function Assert-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal] `
+    $isAdmin = ([Security.Principal.WindowsPrincipal]
         [Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
     if (-not $isAdmin) {
-        Write-Error "This script must be run as Administrator."
+        Write-Err "This script must be run as Administrator."
         exit 1
     }
 }
 
 function Assert-BitLockerModule {
     if (-not (Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
-        Write-Error "BitLocker module is not available on this system."
+        Write-Err "BitLocker PowerShell module is not available."
         exit 1
     }
 }
@@ -56,28 +57,38 @@ function Get-OsVolume {
 
 function Assert-TPMReady {
     try { $tpm = Get-Tpm } catch {
-        Write-Error "Unable to query TPM. Ensure TPM is enabled in UEFI."
+        Write-Err "Unable to query TPM. Ensure TPM is enabled in BIOS/UEFI."
         exit 1
     }
 
     if (-not $tpm.TpmPresent) {
-        Write-Error "TPM not detected."
+        Write-Err "TPM not detected. TPM+PIN requires a TPM chip."
         exit 1
     }
     if (-not $tpm.TpmReady) {
-        Write-Error "TPM is not initialized."
+        Write-Err "TPM is present but not initialized."
         exit 1
     }
 
     Write-Info "TPM is present and ready."
 }
 
+function ConvertToPlain {
+    param([SecureString]$Sec)
+
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Sec)
+    $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+
+    return $plain
+}
+
 function Read-PinSecure {
     $pin1 = Read-Host "Enter BitLocker PIN (4-20 digits)" -AsSecureString
     $pin2 = Read-Host "Confirm PIN" -AsSecureString
 
-    $p1 = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin1))
-    $p2 = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin2))
+    $p1 = ConvertToPlain -Sec $pin1
+    $p2 = ConvertToPlain -Sec $pin2
 
     if ($p1 -ne $p2) { throw "PIN entries do not match." }
 
@@ -95,7 +106,7 @@ function Ensure-RecoveryProtector {
     $rec = $vol.KeyProtector | Where-Object KeyProtectorType -eq "RecoveryPassword" | Select-Object -First 1
 
     if (-not $rec) {
-        Write-Info "Adding recovery password protector..."
+        Write-Info "Adding Recovery Password protector..."
         Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector | Out-Null
     }
 }
@@ -127,7 +138,7 @@ function Backup-RecoveryKey-ToAAD {
     param([string]$MountPoint)
 
     if (-not (Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue)) {
-        Write-Warn "AAD backup not supported."
+        Write-Warn "AAD backup not supported on this system."
         return
     }
 
@@ -135,17 +146,14 @@ function Backup-RecoveryKey-ToAAD {
     $rec = $vol.KeyProtector | Where-Object KeyProtectorType -eq "RecoveryPassword" | Select-Object -First 1
 
     if ($rec) {
+        Write-Info "Backing up recovery key to Entra ID (AAD)..."
         BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $rec.KeyProtectorId
-        Write-Info "Recovery key backed up to Entra ID (AAD)."
     }
 }
 
-function Add-Or-Replace-TpmPinProtector {
+function Set-BitLockerTpmPin {
     param(
-        [Parameter(Mandatory=$true)]
         [string]$MountPoint,
-
-        [Parameter(Mandatory=$true)]
         [SecureString]$Pin
     )
 
@@ -155,9 +163,9 @@ function Add-Or-Replace-TpmPinProtector {
     if ($existingPin) {
         Write-Warn "A TPM+PIN protector already exists."
 
-        $choice = Read-Host "Replace existing PIN? (Y/N)"
-        if ($choice -notmatch "^[Yy]$") {
-            Write-Info "Keeping existing TPM+PIN. Skipping."
+        $resp = Read-Host "Replace existing PIN? (Y/N)"
+        if ($resp -notmatch "^[Yy]$") {
+            Write-Info "Keeping existing PIN. Skipping."
             return
         }
 
@@ -165,11 +173,21 @@ function Add-Or-Replace-TpmPinProtector {
         manage-bde -protectors -delete $MountPoint -id $existingPin.KeyProtectorId | Out-Null
     }
 
-    Write-Info "Adding new TPM+PIN protector..."
-    Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmPinProtector -Pin $Pin | Out-Null
-    Write-Info "New PIN applied successfully."
-}
+    $plain = ConvertToPlain -Sec $Pin
 
+    Write-Info "Adding TPM+PIN using manage-bde..."
+    $cmd = "manage-bde.exe -protectors -add $MountPoint -TPMAndPIN -PIN $plain"
+
+    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmd" -NoNewWindow -PassThru -Wait
+
+    if ($proc.ExitCode -eq 0) {
+        Write-Info "TPM+PIN added successfully."
+    } else {
+        Write-Err "manage-bde returned exit code $($proc.ExitCode)"
+    }
+
+    $plain = $null
+}
 
 function Enable-WithPin {
     Assert-TPMReady
@@ -184,14 +202,12 @@ function Enable-WithPin {
     }
 
     $pin = Read-PinSecure
-    Add-Or-Replace-TpmPinProtector -MountPoint $MountPoint -Pin $pin
+    Set-BitLockerTpmPin -MountPoint $MountPoint -Pin $pin
 
     Ensure-RecoveryProtector -MountPoint $MountPoint
     Save-RecoveryKeyLocally -MountPoint $MountPoint
 
-    if ($BackupRecoveryToAAD) {
-        Backup-RecoveryKey-ToAAD -MountPoint $MountPoint
-    }
+    if ($BackupRecoveryToAAD) { Backup-RecoveryKey-ToAAD -MountPoint $MountPoint }
 
     Write-Warn "Reboot required for the pre-boot PIN screen."
 }
@@ -212,6 +228,6 @@ try {
     }
 }
 catch {
-    Write-Error "$($_.Exception.Message)"
+    Write-Err "$($_.Exception.Message)"
     exit 1
 }
