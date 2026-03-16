@@ -197,40 +197,36 @@ function Enable-WithPin {
     if ($vol.ProtectionStatus -ne "On") {
         Write-Info "Enabling BitLocker (manage-bde)..."
 
-        # Build manage-bde arguments
+        # Build manage-bde arguments (use -encryptionmethod / -em)
         $args = @("-on", $MountPoint, "-skiphardwaretest")
 
-        if ($UsedSpaceOnly) {
-            $args += "-usedspaceonly"
-        }
+        if ($UsedSpaceOnly) { $args += "-usedspaceonly" }
 
-        # Map PowerShell names to manage-bde method tokens
+        # Map PowerShell names to manage-bde method tokens (two-word values)
         $methodMap = @{
-            "XtsAes256" = "xts_aes256"
-            "XtsAes128" = "xts_aes128"
-            "Aes256"    = "aes256"
-            "Aes128"    = "aes128"
+            "XtsAes256" = @("-em", "XTS-AES 256")
+            "XtsAes128" = @("-em", "XTS-AES 128")
+            "Aes256"    = @("-em", "AES 256")
+            "Aes128"    = @("-em", "AES 128")
         }
 
-        $m = $methodMap[$EncryptionMethod]
-        if ($m) {
-            $args += @("-method", $m)
+        if ($methodMap.ContainsKey($EncryptionMethod)) {
+            $args += $methodMap[$EncryptionMethod]
         }
 
         # Start encryption via manage-bde
         $proc = Start-Process -FilePath "manage-bde.exe" -ArgumentList $args -NoNewWindow -PassThru -Wait
         if ($proc.ExitCode -ne 0) {
-            Write-Err "manage-bde -on returned exit code $($proc.ExitCode)"
+            Write-Error "manage-bde -on returned exit code $($proc.ExitCode)"
             exit 1
         }
 
         Write-Info "Encryption started."
-    }
-    else {
+    } else {
         Write-Info "BitLocker already enabled."
     }
 
-    # Ask and set PIN (function already handles replace logic)
+    # Ask and set PIN (function handles replace logic and uses manage-bde)
     $pin = Read-PinSecure
     Set-BitLockerTpmPin -MountPoint $MountPoint -Pin $pin
 
@@ -238,9 +234,7 @@ function Enable-WithPin {
     Ensure-RecoveryProtector -MountPoint $MountPoint
     Save-RecoveryKeyLocally -MountPoint $MountPoint
 
-    if ($BackupRecoveryToAAD) {
-        Backup-RecoveryKey-ToAAD -MountPoint $MountPoint
-    }
+    if ($BackupRecoveryToAAD) { Backup-RecoveryKey-ToAAD -MountPoint $MountPoint }
 
     Write-Warn "Reboot required for the pre-boot PIN screen."
 }
